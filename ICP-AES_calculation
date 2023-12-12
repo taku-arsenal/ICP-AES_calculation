@@ -1,0 +1,223 @@
+# %%
+import tkinter as tk
+from tkinter import filedialog, simpledialog, messagebox, ttk
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import r2_score
+import os
+
+def plot_best_fit_curve_and_save_as_images(hosei_correction_sheet, output_directory):
+    best_fit_poly_funcs = []
+    try:
+        # X軸データ（左から1列目）
+        x = hosei_correction_sheet.iloc[:, 0]
+
+        # 左から3列目以降の各列に対する処理
+        for col_index in range(2, len(hosei_correction_sheet.columns)):  # 3列目以降
+            y = hosei_correction_sheet.iloc[:, col_index]  # Y軸データ
+
+            # 近似曲線の次数の範囲
+            degrees = range(1, 7)
+
+            # 最適な近似曲線を選択
+            best_degree = None
+            best_r2 = 0
+            best_poly = None
+
+            for degree in degrees:
+                # 多項式フィット
+                poly_fit = np.polyfit(x, y, degree)
+                poly = np.poly1d(poly_fit)
+                y_pred = poly(x)
+
+                # 決定係数（R^2）を計算
+                r2 = r2_score(y, y_pred)
+
+                if r2 > best_r2:
+                    best_r2 = r2
+                    best_degree = degree
+                    best_poly = poly
+
+            # 近似曲線関数のリストに追加
+            best_fit_poly_funcs.append(best_poly)
+
+            # 近似式の文字列を作成（小数点以下4桁で表示）
+            equation = f'y = {" + ".join([f"{coef:.4f}x^{i}" for i, coef in enumerate(poly_fit[::-1])])}'
+
+            # プロットのタイトルを列名から設定
+            plot_title = hosei_correction_sheet.columns[col_index]
+            valid_plot_title = plot_title.replace('\n', ' ').replace('/', '_').replace('\\', '_')
+
+            # プロットの作成
+            plt.figure(figsize=(9, 9))
+            x_fit = np.linspace(min(x), max(x), 100)
+            y_fit = best_poly(x_fit)
+            plt.scatter(x, y, label='Data')
+            plt.plot(x_fit, y_fit, label=f'Best Fit (Degree {best_degree}, R^2: {best_r2:.2f})\n{equation}', color='red')
+            plt.xlabel(hosei_correction_sheet.columns[0])
+            plt.ylabel(valid_plot_title)
+            plt.title(valid_plot_title)
+            plt.legend()
+
+            # 画像ファイル名を設定し、保存
+            image_filename = f'{valid_plot_title}.png'
+            image_output_path = os.path.join(output_directory, image_filename)
+            plt.savefig(image_output_path)
+            plt.close()
+
+    except Exception as e:
+        messagebox.showerror("Error", f"An error occurred: {e}")
+
+    return best_fit_poly_funcs
+
+def apply_correction_and_create_sheet(base_reduction_sheet, best_fit_poly_funcs):
+    # base減算シートをコピーして補正適用後シートを作成
+    corrected_sheet = base_reduction_sheet.copy()
+
+    # base減算シートの各行に対して補正を適用
+    for row_index in range(len(base_reduction_sheet)):
+        x_value = base_reduction_sheet.iloc[row_index, 0]  # 1列目の値をxとして使用
+
+        # 8列目以降の各列に対して補正を適用
+        for col_index in range(7, len(base_reduction_sheet.columns)):
+            poly_func = best_fit_poly_funcs[col_index - 7]  # 対応する近似曲線関数
+            y_value = poly_func(x_value)  # 近似曲線関数からyの値を計算
+            corrected_value = base_reduction_sheet.iloc[row_index, col_index] * y_value  # 乗算して補正値を計算
+            corrected_sheet.iloc[row_index, col_index] = corrected_value  # 補正値を記載
+
+    return corrected_sheet
+
+def get_blank_identifier():
+    # "blank" 行の識別子の入力ダイアログ
+    blank_identifier = simpledialog.askstring("Blank Row Identifier", "Blankの名前を記入してください:", initialvalue="blank")
+    return blank_identifier
+
+def blank_subtraction(sheet, blank_identifier):
+    # "blank減算" シートを作成し、元のシートのデータをコピー
+    blank_sub_sheet = sheet.copy()
+
+    # 指定された識別子がある行を見つける
+    blank_rows = blank_sub_sheet.iloc[:, 1].str.contains(blank_identifier, na=False)
+
+    # 左から8列目以降の各列に対する処理
+    for col_index in range(7, len(blank_sub_sheet.columns)):
+        mean_value = blank_sub_sheet.loc[blank_rows, blank_sub_sheet.columns[col_index]].mean()
+        blank_sub_sheet.iloc[:, col_index] -= mean_value
+
+    return blank_sub_sheet
+
+def correct_excel_data(file_path, sheet_name, base_name, output_file_path):
+    try:
+        df = pd.read_excel(file_path, sheet_name=sheet_name)
+
+        # 左から二番目の列（B列）を基準に基準行の処理を行う
+        base_rows = df.iloc[:, 1].astype(str).str.contains(base_name)
+
+        # 左から8番目の列（H列）から最終列までの処理を行う
+        for column_index in range(7, len(df.columns)):  # H列は8番目の列（0-indexed）
+            # base行の平均値を計算
+            base_average = df.loc[base_rows, df.columns[column_index]].mean()
+            
+            # 全てのセルからbase_averageを減算
+            df.iloc[:, column_index] = df.iloc[:, column_index] - base_average
+
+        # 補正係数シートの列名を設定
+        column_names = ['hosei_1st_col', 'hosei_2nd_col'] + [f'補正係数_{df.columns[i]}' for i in range(7, len(df.columns))]
+
+        # 補正係数シートの作成
+        hosei_correction_sheet = pd.DataFrame(columns=column_names)
+
+        # hosei①（最初のhosei）行の特定
+        hosei_initial_row = df[df.iloc[:, 1].astype(str).str.contains('hosei')].iloc[0]
+
+        # 各hosei行に対する補正係数の計算と追加
+        hosei_rows = df[df.iloc[:, 1].astype(str).str.contains('hosei')].index
+        for index in hosei_rows:
+            hosei_row = df.iloc[index]
+            hosei_data = [hosei_row[0], hosei_row[1]]
+            hosei_data += [(hosei_initial_row[df.columns[i]] / hosei_row[df.columns[i]]) if hosei_row[df.columns[i]] != 0 else "" for i in range(7, len(df.columns))]
+            hosei_correction_sheet.loc[index] = hosei_data
+
+        # 新しいExcelファイルに保存
+        with pd.ExcelWriter(output_file_path) as writer:
+            df.to_excel(writer, sheet_name='base減算', index=False)
+            hosei_correction_sheet.to_excel(writer, sheet_name='補正係数', index=False)
+
+        # ユーザーから "blank" 行の識別子を取得
+        blank_identifier = get_blank_identifier()
+
+        # 画像出力パスの設定
+        output_directory = os.path.dirname(output_file_path)
+        best_fit_poly_funcs = plot_best_fit_curve_and_save_as_images(hosei_correction_sheet, output_directory)
+
+        # 新しいExcelファイルに保存
+        with pd.ExcelWriter(output_file_path) as writer:
+            df.to_excel(writer, sheet_name='base減算', index=False)
+            hosei_correction_sheet.to_excel(writer, sheet_name='補正係数', index=False)
+            corrected_sheet = apply_correction_and_create_sheet(df, best_fit_poly_funcs)
+            corrected_sheet.to_excel(writer, sheet_name='補正適用後', index=False)
+
+            # "blank減算" シートの処理
+            blank_sub_sheet = blank_subtraction(corrected_sheet, blank_identifier)
+            blank_sub_sheet.to_excel(writer, sheet_name='blank減算', index=False)
+
+    except Exception as e:
+        messagebox.showerror("Error", f"An error occurred: {e}")
+
+def get_base_name():
+    # 基準行名の入力ダイアログ
+    base_name = simpledialog.askstring("Base Row Name", "Enter the base row name:", initialvalue="base")
+    return base_name
+
+def select_sheet(file_path, callback):
+    # 利用可能なシートのリストを取得
+    xls = pd.ExcelFile(file_path)
+    sheet_names = xls.sheet_names
+
+    # シート選択のための新しいウィンドウを作成
+    window = tk.Toplevel()
+    window.title("Select Sheet")
+    window.grab_set()  # このウィンドウが閉じるまで他のウィンドウの操作を無効化
+
+    # メッセージの表示
+    message_label = tk.Label(window, text="標準液単位の濃度を選択してください")
+    message_label.pack(pady=5, padx=10)
+
+    # ドロップダウンリストの作成
+    selected_sheet = tk.StringVar(window)
+    selected_sheet.set(sheet_names[0])  # デフォルト値を設定
+    dropdown = ttk.Combobox(window, textvariable=selected_sheet, values=sheet_names, state="readonly")
+    dropdown.pack(pady=10, padx=10)
+
+    # OKボタン
+    def on_ok():
+        callback(selected_sheet.get())
+        window.destroy()
+
+    ok_button = tk.Button(window, text="OK", command=on_ok)
+    ok_button.pack(pady=5)
+
+    # ウィンドウをモーダルとして扱う
+    window.wait_window()
+
+def open_file_dialog():
+    # ファイル選択ダイアログを開く
+    input_file_path = filedialog.askopenfilename(title="Select Excel file", filetypes=[("Excel files", "*.xlsx")])
+    if input_file_path:
+        base_name = get_base_name()
+        if base_name:
+            def on_sheet_selected(sheet_name):
+                output_file_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")])
+                if output_file_path:
+                    correct_excel_data(input_file_path, sheet_name, base_name, output_file_path)
+                    messagebox.showinfo("Success", "File processed and saved successfully.")
+
+            select_sheet(input_file_path, on_sheet_selected)
+
+# Tkinterウィンドウの初期化
+root = tk.Tk()
+root.withdraw()  # メインウィンドウを非表示にする
+
+# ファイル選択ダイアログを開く
+open_file_dialog()
